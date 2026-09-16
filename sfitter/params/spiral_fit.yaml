@@ -1,0 +1,70 @@
+run_name: spiral_fit
+
+fitter: flow
+precision: double
+
+likelihood: spiral
+
+prescale:
+  samples: 10240
+  smc_steps: 1000
+  mcmc_steps: 500
+  smc_resampling_threshold: 0.3
+  step_size: 0.002
+  step_adjust_factor: 2.
+  target_acceptance: 0.33
+  prior_width: 2.
+
+architecture:
+  spline_bins: 64
+  layers: 3
+  hidden_nodes: 64
+  spline_bound: 10
+
+pretrain:
+  batch_size: 1024
+  epochs: 25
+  mcmc_steps: 20
+  log_interval: 5
+
+training:
+  lr: 1.e-3
+  batch_size: 1024
+  batches: 200
+  log_interval: 10
+  steps: 4
+  mcmc_type: standard
+  mcmc_steps: 1
+  mcmc_step_size: 0.001
+  step_size_adjust: 1.5
+  buffer_size: 256
+  min_buffer_size: 30
+  buffer_batches: 6
+  buffer_replacement: False
+
+sampling:
+  batches: 100
+  batch_size: 100000
+  lower_bound_quantile: 0.001
+  upper_bound_quantile: 0.999
+  margin_factor: 0.2
+  marginal_bins_1d: 200
+  marginal_bins_2d: 100
+  profile_points_1d: 200
+  profile_points_2d: 100
+  weight_clip: 100
+  weight_lower_bound_quantile: 0.001
+  weight_upper_bound_quantile: 0.9999
+  weight_bins: 50
+
+profile_1d:
+  batch_size: 100000
+  gd_learning_rate: 1.e-1
+  gd_steps: 200
+  optimizer: lbfgs
+
+profile_2d:
+  batch_size: 50000
+  gd_learning_rate: 1.e-1
+  gd_steps: 1
+  optimizer: adam
