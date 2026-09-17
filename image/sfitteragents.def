@@ -1,0 +1,188 @@
+Bootstrap: docker
+From: node:22-trixie
+
+# SFitterAgents image — MadGraph (NLO stack: FastJet, LHAPDF, Pythia8, ninja,
+# collier) + the SFitter fitting tool + CUDA PyTorch, in a single /opt/envs/MAD
+# venv.
+#
+# BASE = node:22-trixie (Debian 13). The session submits compute with the
+# in-image slurm-client, which must be able to talk to the host's SLURM
+# controller: trixie ships SLURM 24.11 and glibc 2.41. The newer glibc is also
+# what lets apptainer's bundled `faked` run during the unprivileged build.
+#
+# Build with:  ./image/create_image.sh
+
+%files
+    image/requirements.txt /opt/requirements.txt
+    # Staged from sfitter/ by image/create_image.sh.
+    image/.build/sfitter /opt/sfitter
+
+%post
+    set -eux
+
+    # Belt-and-suspenders for the unprivileged (root-mapped, no /etc/subuid)
+    # build: faked fakes most ownership ops, but tell GNU tar to skip ownership
+    # restoration anyway, so the MG5 tarball and the archives MadGraph's
+    # `install` step extracts never trip "Cannot change ownership".
+    export TAR_OPTIONS=--no-same-owner
+
+    # Disable apt's _apt privilege-drop sandbox before any apt-get: with no
+    # /etc/subuid mapping the drop to the `_apt` user fails ("setgroups:
+    # Operation not permitted"). Harmless, as %post already runs as the build's
+    # effective root.
+    echo 'APT::Sandbox::User "root";' > /etc/apt/apt.conf.d/01-no-sandbox
+
+    ###########################################
+    ## System dependencies ####################
+    ###########################################
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update
+    apt-get install -y --no-install-recommends \
+        ca-certificates bash findutils \
+        python3 python3-pip python3-venv python3-dev python-is-python3 \
+        wget locales build-essential gfortran \
+        libtbb-dev rsync ghostscript imagemagick \
+        nodejs npm cmake \
+        swig autoconf libtool libboost-dev libgmp-dev libmpfr-dev \
+        binutils dpkg-dev git libssl-dev \
+        libx11-dev libxext-dev libxft-dev libxpm-dev libgif-dev bc \
+        libhdf5-dev libblosc-dev \
+        slurm-client munge libxml2
+    # slurm-client (sbatch/srun/squeue/scancel/sinfo) + munge: the session
+    # submits compute to the host's SLURM directly. The launcher binds the
+    # host's SLURM config and auth socket at runtime; these are the clients.
+    apt-get clean
+    rm -rf /var/lib/apt/lists/*
+
+    ###########################################
+    ## Locale #################################
+    ###########################################
+    echo "en_US.UTF-8 UTF-8" > /etc/locale.gen
+    locale-gen
+    update-locale LANG=en_US.UTF-8 LC_CTYPE=C.UTF-8
+
+    mkdir -p /opt/envs
+
+    ###########################################
+    ## Single venv at /opt/envs/MAD ###########
+    ## (SFitter + torch + MadGraph stack) #####
+    ###########################################
+    python3 -m venv /opt/envs/MAD
+    /opt/envs/MAD/bin/pip install --upgrade pip
+
+    # PyTorch FIRST from the CUDA 12.1 index, so sfitter's setup.py sees a CUDA
+    # torch already satisfied (fits run on the GPU) and does not pull a
+    # non-CUDA wheel from PyPI.
+    /opt/envs/MAD/bin/pip install --no-cache-dir \
+        --index-url https://download.pytorch.org/whl/cu121 \
+        torch==2.5.1+cu121
+
+    # Pinned non-torch dependencies (MadGraph analysis + SFitter runtime).
+    /opt/envs/MAD/bin/pip install --no-cache-dir \
+        --requirement /opt/requirements.txt
+
+    # Every subpackage under /opt/sfitter/sfitter needs an __init__.py for
+    # setup.py's find_packages() to pick it up; a missing one silently drops
+    # the submodule from the install.
+    find /opt/sfitter/sfitter -mindepth 1 -type d \
+        ! -name '__pycache__' \
+        -exec sh -c '[ -f "$1/__init__.py" ] || touch "$1/__init__.py"' _ {} \;
+
+    # Install SFitter from the staged source. The `sfitter` CLI lands at
+    # /opt/envs/MAD/bin/sfitter; the source tree stays at /opt/sfitter
+    # ($SFITTER_INSTALL), with the example datacards under data/ and run cards
+    # under params/.
+    /opt/envs/MAD/bin/pip install --no-cache-dir /opt/sfitter
+
+    ###########################################
+    ## MadGraph + tools #######################
+    ###########################################
+    mkdir -p /opt/MG5_aMC
+    . /opt/envs/MAD/bin/activate
+    cd /opt
+
+    MG_VERSION="3.7.0"
+    MG_TAR="MG5_aMC_v${MG_VERSION}.tar.gz"
+    wget -q "https://launchpad.net/mg5amcnlo/3.0/3.6.x/+download/${MG_TAR}"
+    tar -xzf "${MG_TAR}" --no-same-owner -C /opt/MG5_aMC --strip-components=1
+    rm -f "${MG_TAR}"
+
+    cd /opt/MG5_aMC
+    # ninja + collier = the NLO loop-reduction libraries aMC@NLO links via
+    # MadLoop (`install ninja` pulls in oneloop). They MUST precede
+    # `install Delphes`: Delphes fails here (no ROOT in this image) and a failed
+    # install aborts the rest of the command file. Baking them in means agents
+    # never try to install them at runtime into the read-only /opt.
+    printf 'install fastjet\ninstall lhapdf6\ninstall pythia8\ninstall ninja\ninstall collier\ninstall Delphes\nquit\n' > /opt/mg5_install.cmd
+    echo "=== Starting MadGraph installation (FastJet + LHAPDF + Pythia8 + ninja + collier + Delphes) ==="
+    ./bin/mg5_aMC /opt/mg5_install.cmd 2>&1 | tee /opt/mg5_install.log
+
+    FASTJET_CFG="$(find /opt/MG5_aMC/HEPTools -type f -name fastjet-config -print -quit || true)"
+    LHAPDF_CFG="$(find /opt/MG5_aMC/HEPTools -type f -name lhapdf-config -print -quit || true)"
+    {
+        [ -x "$LHAPDF_CFG" ]  && echo "set lhapdf ${LHAPDF_CFG}"
+        [ -x "$FASTJET_CFG" ] && echo "set fastjet ${FASTJET_CFG}"
+        echo "save options /opt/MG5_aMC/input/mg5_configuration.txt"
+        echo "quit"
+    } > /opt/mg5_fix.cmd
+    /opt/MG5_aMC/bin/mg5_aMC /opt/mg5_fix.cmd
+    echo "MadGraph installation log stored at: /opt/mg5_install.log"
+
+    # %post runs without pipefail, so a failed tool install above does not stop
+    # the build. Check that every tool the agents rely on is there (Delphes is
+    # expected to fail: the image has no ROOT).
+    for tool in fastjet/bin/fastjet-config lhapdf6_py3/bin/lhapdf-config pythia8 ninja collier; do
+        if [ ! -e "/opt/MG5_aMC/HEPTools/${tool}" ]; then
+            echo "ERROR: MadGraph tool installation incomplete: /opt/MG5_aMC/HEPTools/${tool} is missing (see /opt/mg5_install.log)" >&2
+            exit 1
+        fi
+    done
+
+    # Bake the SMEFTatNLO UFO model (v1.0.3, from the authors' release,
+    # https://feynrules.irmp.ucl.ac.be/wiki/SMEFTatNLO) into MG5's models/ so
+    # `import model SMEFTatNLO-LO` / `-NLO` resolves by name. The download is
+    # checked against a pinned checksum; the tarball's macOS metadata files
+    # (._*) are skipped. MG5 regenerates the pickle cache on first import.
+    SMEFT_TAR="SMEFTatNLO_v1.0.3.tar.gz"
+    SMEFT_SHA256="4d013fe3a59b14973b65be632a4f16dbcf57b8aa3d0fd7ff1fc546abee28af21"
+    wget -q -O "/tmp/${SMEFT_TAR}" \
+        "https://feynrules.irmp.ucl.ac.be/raw-attachment/wiki/SMEFTatNLO/${SMEFT_TAR}"
+    echo "${SMEFT_SHA256}  /tmp/${SMEFT_TAR}" | sha256sum -c -
+    tar -xzf "/tmp/${SMEFT_TAR}" --no-same-owner --exclude='._*' -C /opt/MG5_aMC/models
+    rm -f "/tmp/${SMEFT_TAR}"
+    echo "Installed SMEFTatNLO into /opt/MG5_aMC/models/"
+
+%environment
+    # PATH (MadGraph bin). The MAD venv is not forced onto PATH here: the launcher
+    # activates it for agent sessions, and cluster-exec for cluster jobs.
+    export PATH=/opt/MG5_aMC/bin:/usr/local/bin:/usr/bin:/bin
+
+    # Locale
+    export LANG=en_US.UTF-8
+    export LC_ALL=en_US.UTF-8
+    export LC_CTYPE=C.UTF-8
+
+    # Shell / editor
+    export CLI_CMD="bash"
+    export EDITOR=nano
+    export VISUAL=$EDITOR
+
+    # Single venv (SFitter + torch + MadGraph analysis)
+    export MadVenv=/opt/envs/MAD
+    export VIRTUAL_ENV=$MadVenv
+
+    export PYTHONPATH="/opt/MG5_aMC/bin${PYTHONPATH:+:$PYTHONPATH}"
+
+    # LHAPDF + FastJet
+    export LHAPDF_DIR=/opt/MG5_aMC/HEPTools/lhapdf6_py3
+    export LD_LIBRARY_PATH=$LHAPDF_DIR/lib:$LHAPDF_DIR/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
+    export PATH=/opt/MG5_aMC/HEPTools/lhapdf6_py3/bin:/opt/MG5_aMC/HEPTools/fastjet/bin:$PATH
+
+    # Named handles the agent cards, rules and skills cite.
+    export MADGRAPH_INSTALL=/opt/MG5_aMC
+    export SFITTER_INSTALL=/opt/sfitter
+    export SFITTER_DOCS=/sfitter_docs
+
+%labels
+    Base "debian:13 (trixie) + node:22"
+    Purpose "SFitterAgents: MadGraph (NLO) + SFitter + CUDA PyTorch"

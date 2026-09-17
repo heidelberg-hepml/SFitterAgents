@@ -140,3 +140,38 @@ dmypy.json
 .vscode
 
 .idea
+
+# --- SFitterAgents: local configuration and credentials, never commit ---
+config.env
+# The default Claude Code config dir holds your login.
+claude_config/
+.credentials.json
+**/.credentials.json
+**/.claude.json
+# Only the repository-root .claude/ is local session state; the agent system
+# under sfitteragents/.claude/ is tracked.
+/.claude/
+# Auto-memory the agents write belongs to sessions, never to the shipped tree.
+sfitteragents/.claude/agent-memory/*
+!sfitteragents/.claude/agent-memory/.gitkeep
+sfitteragents/.claude/lead-memory/*
+!sfitteragents/.claude/lead-memory/.gitkeep
+
+# --- Sessions, cluster scratch, site-specific facts ---
+sessions/
+cluster_runs/
+internals/
+
+# --- Container images and build scratch ---
+*.sif
+*.img
+image/.build/
+image/.sandbox_tmp/
+image/sfitteragents_sandbox/
+
+# --- Tool litter ---
+.nfs*
+# PLY parser cache MadGraph's UFO parser writes to its working directory
+py.py
+parser.out
+core.*

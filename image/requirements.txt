@@ -1,0 +1,23 @@
+# Pinned Python requirements for the SFitterAgents Apptainer image.
+#
+# NOTE: torch is NOT listed here. It is installed separately in sfitteragents.def
+# from the PyTorch CUDA 12.1 index BEFORE this file is processed, so when
+# sfitter's setup.py resolves its install_requires it sees torch already
+# present and does not pull a non-CUDA wheel from PyPI.
+
+# MadGraph analysis stack
+si==0.1.1-1
+numpy==2.3.5
+matplotlib==3.10.7
+pyhepmc==2.16.1
+fastjet==3.5.1.2
+bc==0.0.1
+
+# SFitter non-torch runtime dependencies
+# (numpy/matplotlib already listed above)
+pandas>=2.2,<3
+scipy>=1.14,<2
+tables>=3.10,<4
+tqdm>=4.66
+pyyaml>=6.0
+vegas>=6.0
